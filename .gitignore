@@ -23,3 +23,5 @@ results
 
 *.iml
 package-lock.json
+
+serverless.yml

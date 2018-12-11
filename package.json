@@ -14,11 +14,14 @@
   },
   "license": "MIT",
   "dependencies": {
-    "opsgenie-sdk": "^0.4.2",
     "@slack/client": "^3.15.0",
+    "bluebird": "^3.5.3",
     "lodash.keyby": "^4.6.0",
     "lodash.mapvalues": "^4.6.0",
-    "lodash.omit": "^4.5.0"
+    "lodash.omit": "^4.5.0",
+    "opsgenie-sdk": "^0.4.2",
+    "request-promise": "^4.2.2",
+    "xml2js": "^0.4.19"
   },
   "repository": {
     "type": "git",

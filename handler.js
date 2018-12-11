@@ -1,88 +1,77 @@
 'use strict';
 
-const opsgenie = require('opsgenie-sdk');
 const {WebClient} = require('@slack/client');
-const keyBy = require('lodash.keyby');
-const omit = require('lodash.omit');
-const mapValues = require('lodash.mapvalues');
+//const keyBy = require('lodash.keyby');
+//const omit = require('lodash.omit');
+//const mapValues = require('lodash.mapvalues');
+var Promise = require('bluebird');
+var rp = require('request-promise');
+var parseString = Promise.promisify(require('xml2js').parseString);
 
 const token = process.env.SLACK_VERIFICATION_TOKEN,
-    accessToken = process.env.SLACK_ACCESS_TOKEN,
-    opsgenieApiKey = process.env.OPSGENIE_API_KEY;
+    accessToken = process.env.SLACK_ACCESS_TOKEN;
 
-function extractAlertIdFromLink(linkUrl) {
-    function execRegex(regExp, text) {
-        return regExp.exec(text);
+
+// From https://github.com/rshin/arxiv-slack-bot/blob/master/index.js
+const ARXIV_ID   = /\d{4}\.\d{4,5}/;
+const ARXIV_LINK = /(?:https?:\/\/)?arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,5})(?:v\d+)?(?:.pdf)?/g;
+const ARXIV_API_URL = 'http://export.arxiv.org/api/query?search_query=id:';
+
+const fetchArxiv = function (arxivId, callback) {
+  return rp(ARXIV_API_URL + arxivId).then(parseApiResponseBody);
+};
+
+const parseApiResponseBody = function (body) {
+  return parseString(body).then(result => {
+    if (!result.feed.entry) {
+      throw new Error('ArXiv entry not found');
     }
-
-    // this expression is to extract alert id from the url you see when you open an alert in OG
-    // https://app.opsgenie.com/alert/V2#/show/6f756050-b815-4ca2-82b9-beffac75779d-1516617363949/details
-    // You improve this for other cases and possible opsg.in short urls. Then :party:
-    const extractedIdArray = execRegex(new RegExp('show/(.*)/details', 'ig'), linkUrl);
-
-    if (!extractedIdArray || extractedIdArray.length < 1) {
-        return null;
-    } else {
-        return extractedIdArray[1];
-    }
+    var entry = result.feed.entry[0];
+    return {
+      id      : entry.id ?
+                entry.id[0].split('/').pop() :
+                '{No ID}',
+      url     : entry.id ?
+                entry.id[0] :
+                '{No url}',
+      title   : entry.title ?
+                entry.title[0].trim().replace(/\n/g, ' ') :
+                '{No title}',
+      summary : entry.summary ?
+                entry.summary[0].trim().replace(/\n/g, ' ') :
+                '{No summary}',
+      authors : entry.author ?
+                entry.author.map(function (a) { return a.name[0]; }) :
+                '{No authors}',
+      categories : entry.category ? entry.category.map(c => c.$.term) : [],
+      updated_time : Date.parse(entry.updated) / 1000,
+    };
+  });
 }
 
-function getOpsGenieAlert(alertId) {
-    return new Promise((resolve, reject) => {
-        // pass opsgenie api key to opsgenie node client
-        opsgenie.configure({'api_key': opsgenieApiKey});
-
-        opsgenie.alertV2.get({
-                                 identifier: alertId,
-                                 identifierType: "id"
-                             },
-                             function (error, alert) {
-                                 if (error) {
-                                     reject(error);
-                                 } else {
-                                     resolve(alert);
-                                 }
-                             });
-    });
+const formatArxivAsAttachment = function (arxivData) {
+  return {
+    author_name: arxivData.authors.join(', '),
+    title      : '[' + arxivData.id + '] ' + arxivData.title,
+    title_link : arxivData.url,
+    text       : arxivData.summary,
+    footer     : arxivData.categories.join(', '),
+    footer_icon: 'https://arxiv.org/favicon.ico',
+    ts         : arxivData.updated_time,
+    color      : '#b31b1b',
+  };
 }
 
-function messageAttachmentFromLink(link) {
-
-    const alertId = extractAlertIdFromLink(link.url);
-
-    return getOpsGenieAlert(alertId).then((alert) => {
-        const d = alert.data;
-        return {
-            "color": "#36a64f",
-            "title": "OpsGenie Alert #" + d.tinyId,
-            "title_link": "https://opsg.in/i/" + d.tinyId,
-            "text": d.message,
-            "fields": [
-                {
-                    "title": "Priority",
-                    "value": d.priority,
-                    "short": true
-                },
-                {
-                    "title": "Status",
-                    "value": d.status,
-                    "short": true
-                }
-            ],
-            "footer": "OpsGenie",
-            "footer_icon": "https://cdn2.hubspot.net/hubfs/2759414/og-logo-small.png",
-            url: link.url
-        };
-    });
-}
 
 module.exports.unfurl = (event, context, callback) => {
-
+    // console.log(event)
+    // console.log(context)
+    
     const payload = event.body;
 
     // verify necessary tokens are set in environment variables
-    if (!token || !accessToken || !opsgenieApiKey) {
-        return callback("OpsGenie ApiKey, Slack verification token and access token should be set");
+    if (!token || !accessToken) {
+        return callback("Slack verification token and access token should be set");
     }
 
     // Verification Token validation to make sure that the request comes from Slack
@@ -94,12 +83,20 @@ module.exports.unfurl = (event, context, callback) => {
         const slack = new WebClient(accessToken);
         const event = payload.event;
 
-        Promise.all(event.links.map(messageAttachmentFromLink))
-            .then(attachments => keyBy(attachments, 'url'))
-            .then(unfurls => mapValues(unfurls, attachment => omit(attachment, 'url')))
-            .then(unfurls => slack.chat.unfurl(event.message_ts, event.channel, unfurls))
+        var unfurls = {};
+    
+        Promise.all(event.links.map(link => {
+            if (link.domain !== 'arxiv.org') {
+                throw new Error('incorrect link.domain: ' + link.domain);
+            }
+            return fetchArxiv(link.url.match(ARXIV_ID)[0]).then(arxiv => {
+                unfurls[link.url] = formatArxivAsAttachment(arxiv);
+                console.log(unfurls);
+            });
+        })).then(unfurls => slack.chat.unfurl(
+            event.message_ts, event.channel, unfurls))
             .catch(console.error);
-
+        
         return callback();
     }
     // challenge sent by Slack when you first configure Events API
