@@ -50,7 +50,10 @@ const parseApiResponseBody = function (body) {
 }
 
 const formatArxivAsAttachment = function (arxivData) {
-  return {
+    // testing...
+    // return {text: "Hi this is a test"};
+    
+    return {
     author_name: arxivData.authors.join(', '),
     title      : '[' + arxivData.id + '] ' + arxivData.title,
     title_link : arxivData.url,
@@ -64,9 +67,6 @@ const formatArxivAsAttachment = function (arxivData) {
 
 
 module.exports.unfurl = (event, context, callback) => {
-    // console.log(event)
-    // console.log(context)
-    
     const payload = event.body;
 
     // verify necessary tokens are set in environment variables
@@ -85,17 +85,30 @@ module.exports.unfurl = (event, context, callback) => {
 
         var unfurls = {};
     
-        Promise.all(event.links.map(link => {
+        Promise.map(event.links, link => {
             if (link.domain !== 'arxiv.org') {
                 throw new Error('incorrect link.domain: ' + link.domain);
             }
             return fetchArxiv(link.url.match(ARXIV_ID)[0]).then(arxiv => {
                 unfurls[link.url] = formatArxivAsAttachment(arxiv);
-                console.log(unfurls);
             });
-        })).then(unfurls => slack.chat.unfurl(
-            event.message_ts, event.channel, unfurls))
-            .catch(console.error);
+        }).then(() => {
+            var form = {
+                token: token,
+                channel: event.channel,
+                ts: event.message_ts,
+                unfurls: JSON.stringify(unfurls)
+            };
+            // console.log(form)
+            
+            return rp.post({
+                url: 'https://slack.com/api/chat.unfurl',
+                form: form,
+                headers: { 'content-type': "application/json" }
+            });
+        }).catch(err => {
+            console.log('error:', err);
+        });
         
         return callback();
     }
